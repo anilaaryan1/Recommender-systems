@@ -1,0 +1,1045 @@
+---
+title: "DataScience for Industry - Assignment 1"
+author: "Anil Kumar Pathipati - PTHANI001"
+date: '`r format(Sys.Date(), "%d-%B-%Y")`'
+output:
+ bookdown::pdf_book:
+    toc: true
+    fig_caption: yes
+    latex_engine: xelatex
+   
+
+---
+
+\newpage  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,fig.align="center",fig.height=10,fig.width = 18,tidy.opts=list(width.cutoff=60),tidy=TRUE)
+rm(list=ls())
+```
+
+**Introduction**:
+---------------
+
+We were given a book store data set with 3 columns where we have user ID's, book ID and the rating given to each book by each user ID. We are asked to build a recommender systems to predict the missing ratings of the users. Now, lets try to understand what recommender system do, Recommender systems actually look at user buying patterns and check the user similarities and then recommend the new users/exisiting users on the next best book they can read or next product they can purchase. Now, our task is to predict the ratings based on which we would recommend the books to the users. Now to do this task, we are asked to explore collaborative filtering techniques which include user- based, item based and matrix factorization. Lets understand each of these in the next steps when we implement them. Once, we predict the missing ratings with all the 3 methods, we are asked to focus on matrix factorization method in specific and asked to check the accuracy of the model before and after applying regularization and bias. We will understand each of them in detail when we go there. Once, we have predictions from all the above models, we are asked to build an final Ensemble model which ensembles the predictions from the three methods and evaluate the final model using RMSE to see how this model predicts unseen ratings.
+
+Also the final recommender system should also be able to provide recommendations both for existing users and new users. we are asked to assume that the new user will provide explicit ratings for a small number of books when joining the platform to avoid cold start problems. What is a cold start problem? for example, when a new user joins a platform, the system does not know what to recommend to this new user, because his interactions with the exisiting users or the items is not known without which we cannot know how this new user is similar to other existing users to recommend him. To avoid this, we will assume that the new user have atleast rated few books which will help us to create similarity scores for this new user and recommend him based on that. We will discuss each of this in detail in the next steps.
+
+So, lets go ahead and start working on the task. For this we would need some data which is given to us with user ID, book id and their ratings. Lets understand the given data set first which will decide our next steps.
+
+lets go ahead Import data set to our console and required libraries to perform this task. As we have a data frame, we would need tidyverse to do data manipulations. So I will load tidyverse, and also recosystem for matrix factorization
+
+```{r}
+library(tidyverse)
+library(recosystem)
+library(DataExplorer)
+library(data.table)
+library(caret)
+library(reshape2)
+library(Metrics)
+library(VIM)
+library(kableExtra)
+##loading the R.data set from the local machine
+data<-load("D://Masters//Ds 4 Industry//Assignment 1//book_ratings.RData")
+##converting the data loaded to data frame
+df<-as.data.frame(book_ratings)
+```
+
+Now that we have data loaded, lets understand the nuances of the data using Exploratory data analysis.
+
+**Exploratory Data Analysis**
+---------------
+
+Lets try to understand the content of the data set given to us, as this will help us in understanding if there are any missing value and the data type of different features in the data set
+ 
+For this I will be using a function called Introduce() and use my data frame inside this function which will give us the summary of the given data set as below.
+```{r}
+## data table format for summary
+knitr::kable(t(introduce(df)), row.names = TRUE,caption = "Summary of the given data set'", 
+             col.names = "", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+## plotting the data
+plot_intro(df, title = "Percentages",ggtheme = theme_classic())
+```
+From above, we see that we have ~45k user ratings with 3 columns in which 2 columns being continuous(user ID is also considered as continuous) with no missing values. 
+
+We have 3 columns named user ID's with 10,000 unique users, book ID's with 150 unique books and 11 unique book ratings i.,e from 0 to 10 which will yield us 10000 times 150 ratings which is 1,500,000 ratings in total if the users have rated all the books. Now lets try to understand more about each of the features. Now that we have users,books and their ratings lets understand how many users have rated all the books and how many have not rated any books. This is useful to understand to split your data in the next steps.
+
+```{r}
+##summarizing the ratings
+df1<-df%>%group_by(Book.Rating) %>%summarise(Total_user_ratings = n())
+##plotting the ratings using ggplot
+ggplot(df1,aes(Book.Rating, Total_user_ratings)) + geom_col() +theme_minimal() + scale_x_continuous(breaks =0:10) +ggtitle("Distribution of user ratings")
+##converting to percentages
+dt<-as.data.frame(setDT(df)[,100*.N/nrow(df),by=df$Book.Rating])
+##renaming the column names
+names(dt)[1]<-"Ratings"
+names(dt)[2]<-"Percentage of ratings"
+##arranging the rating percentage in descending order
+dt1<-dt%>%arrange(Ratings)
+##showing the values in a table format
+knitr::kable(round((dt1),2), row.names = TRUE,caption = "Summary of the Ratings'", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+```
+
+Above is the rating distribution of a data set which is a simple summary statistic that shows the proportion of each rating value in the given data
+
+Approximately, the given data set contains 40% of the observed ratings between 1 to 10 which are considered as explicit ratings and ~59% of the observed ratings have 0 ratings from the users and the plot exhibit a skew towards low rating values. Now the first question is what account for this overabundance of low rating values? 
+
+This may be due to that fact that most of the readers wont rate all the books they have read. In other words, most individual users naturally rate only a small percentage of the books they read (which is a reality). That means, the 0 ratings in the given data set are for the users who has read the book but did not rate them.
+
+Out of 1,500,000 ratings that should have been there in the data set if every user has rated every book, we have only ~45k ratings which means approximately we have ratings only for 3% of user and item combination in which 59% of them has not rated the book they have read.Apart from 3% another 97% of the ratings are for the users who did not read the books at all and we should predict those missing ratings and recommend them based on the predicted ratings. This incomplete data leads to the data sparsity.
+
+The next challenge is what should we do with the users who gave 0 ratings and how to handle data sparsity? how and why should we handle these users with 0 ratings, the short answer is, we have only 3% ratings which should be between the scale 1 and 10, we cannot have 0 ratings which means we should guess their ratings to fill the 3% completely to get minimum similarities between the users.To handle these 0 ratings we have to impute them in a reasonable way which is explained in the next steps!
+
+So, before dealing with data sparsity, lets first split the given explicit ratings data set to test and train data sets. We do this because, we want to make sure that we deal with explicit ratings for calculating our model accuracy.Once, we do the data split, then i will Impute only the 0 ratings in the train data set.
+
+To split the data set, I should know where to split them. To know this we should understand how many books(count) did each user rate in our data set 
+
+```{r}
+##summarizing the ratings
+dfk<-df%>%group_by(User.ID) %>%mutate(count=ifelse(Book.Rating==0,0,1))
+dfk1<-dfk%>%group_by(User.ID)%>%summarise(sum(count))
+#dfk2<-dfk1%>%filter(dfk1$`sum(count)`=0)
+dfk1$`sum(count)`<-as.numeric(dfk1$`sum(count)`)
+hist(dfk1$`sum(count)`,xlim=c(0,15),breaks = 75, main="Histogram showing count of ratings per user excluding 0 ratings",xlab = "Count of ratings per user",ylab = "Total number of users",ylim = c(0,6000))
+```
+In the graph above, X-axis represent count of ratings per user and Y-axis represent the total number of users i.,e 10k users. We see that ~60% of the users has read the book but did not rate them and another ~20% of them did rate atleast 1 book and another ~5% has rated atleast 2 books. In this case, I should make sure that my train data set has atleast minimum number of ratings, If I split my train data set assuming atleast 5 ratings for each user to be in my train data set, I will end up having large train data set and small test data set which is not good to evaluate model performance. So, I should split the data in such a way that my test data should have minimum number of observations to evaluate my model. So, I would split my data set considering atleast 2 user ratings for my train data set anything above 2 ratings per user will be moved to test data set. Based on this I will go ahead and do my data split for train and test. 
+
+
+**Data split to Train and Test sets**
+----------------
+
+Based on the above hypothesis, I will do my data split. The detailed method on how I did that has been explained below.
+
+**Methodology Adopted**
+
+For my train data set from the above distribution graph of the given data set, I concluded at least 2 users ratings should be in my train data set.Now to achieve this I have followed the below steps on our data set.
+
+**step 1** 
+lets count the total explicit ratings of each user for which I have to widen the given data set to count for each user.
+      
+**step 2**
+We will join back the count of ratings obtained from step 1 of each user to our original data set where we have data in 3 columns before widening.
+      
+**step 3** 
+for each user, we will generate random numbers between 1 and their total count of their ratings where the rating is present, for example if user 1 has 5 explicit ratings then we will generate 5 random numbers between 1 to 5 and assign them to the ratings where user has given. 
+    
+lets understand why we do that, we should pick up the ratings randomly to our test data set, not in an order(ascending/descending of their ratings) because if we pick ratings in (ascending/descending) order, then the model will only predict the ratings within the threshold specified for example if we limit atleast 2 ratings to our test data set, then our test data set will have the ratings with a higher values and train with the lower values and the model predictions can be biased. So, to get rid of this I am assigning random values. Below is the snapshot of first 10 values in our data frame.
+
+```{r}
+set.seed(1)
+df$User.ID<-as.character(df$User.ID)
+##widening the data set
+check<-df %>%group_by(User.ID) %>%tidyr::pivot_wider(names_from =ISBN, values_from = Book.Rating)
+##converting the user ID to characters
+check$User.ID<-as.character(check$User.ID)
+##converting the data set as a data frame
+check<-as.data.frame(check)
+##counting the ratings given by the users
+##checking total NA's in the data frame
+step1<-check%>%mutate(No_ratings=apply(check[,2:151],1,function(x) sum(length(which(is.na(x))))))
+##counting the total 0 ratings in the data frame
+step1<-step1%>%mutate(missing_ratings=apply(check[,2:151],1,function(x) sum(length(which((x==0))))))
+##creating a new column which give information on total explicit rating count
+step2<-step1%>%mutate(Explicit_rating_count=150-step1$No_ratings-step1$missing_ratings)
+##selecting only required columns
+step3<-step2%>%select(User.ID,Explicit_rating_count)
+##joining the count to original data frame
+join1<-left_join(df,step3,by="User.ID")
+##generating random numbers for user ratings
+join2<-join1%>%group_by(User.ID)%>%mutate(random=ifelse(Book.Rating==0,0,sample(1:Explicit_rating_count,Explicit_rating_count,replace = FALSE)))
+##ranking the random numbers
+join3<-join2%>%group_by(User.ID)%>%mutate(my_ranks = order(order(random, decreasing=TRUE)))
+##mutating the rank column based on book rating
+join4<-join3%>%mutate(final_rank=ifelse(Book.Rating==0,0,my_ranks))
+##selecting only required columns
+join4<-join4[,c(1,2,3,4,7)]
+##renaming the column 
+names(join4)[5]<-"random"
+##showing the values in a table format
+knitr::kable((head(join4)), row.names = TRUE,caption = "Summary of the Explicit ratings count'", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+```
+In the above table, we see that random numbers are generated where ever the ratings are present and the random numbers are generated between the 1 and the count of the user ratings.
+
+**Step 4**
+Now, That we have generated random numbers for each and every rating the user has given, now I will go ahead and split the data set into test and train. Now to  do that, I would need atleast 2 explicit ratings per user in my train data set. so, anything less than 2 ratings, I will leave those users in my train data set(Please note here that, I still did not impute my data which I will be doing post splitting). I have shown below top few rows for reference
+      
+```{r}
+##labelling the rows to train and test with the condition stated
+data_split<-join4%>%mutate(data_split=ifelse(random<=2,"train","test"))
+##showing the values in a table format
+knitr::kable((head(data_split,10)), row.names = TRUE,caption = "Summary of the Explicit ratings count'", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+train<-data_split%>%filter(data_split=="train")
+train<-train[,c(1,2,3)]
+test<-data_split%>%filter(data_split=="test")
+test<-test[,c(1,2,3)]
+```
+Now that we have obtained test and train data sets, lets check how many users are present in train and test data sets.
+
+```{r}
+print(paste0("Total users in train data set are : ", length(unique(train$User.ID))))
+print(paste0("Total Books in train data set are : ", length(unique(train$ISBN))))
+print(paste0("Total users in test data set are : ", length(unique(test$User.ID))))
+print(paste0("Total Books in test data set are : ", length(unique(test$ISBN))))
+
+```
+From above, we will be training for all 10k users and we will be testing on 2058 users.
+
+Now, our next task is to Impute the missing ratings i.,e 0 ratings in the train data set. I am imputing only in the train data set as we have all users and all books in train data set, based on the total predictions on the train data set, lets compare these predictions with the ratings in the test data set (predicted ratings from train data set v/s actual explicit ratings in test data set) to calculate prediction accuracy.
+
+**Dealing with Data Sparsity(Missing Ratings)**
+------------------------
+
+Its almost impossible to work on a real life recommendation system without having to deal with data sparsity. This is expected because normally its rare for each user to rate all the books they read and if a user has not read a book it automatically means that user wont have a rating for that particular book which results in the missing values from both the situations.
+
+As we know that data sparsity is seen as a key disadvantage of CF as it may cause small number of co-rated items or no such ones between two users, resulting in unreliable similarity information, and further incurring poor recommendation quality. To handle this we should impute our missing data in the given data set.
+
+Generally, we will have 2 types of ratings, one type is explicit ratings which are actual ratings given by the readers and Implicit ratings which are the imputed ratings which we should do in the next steps.
+
+The way we Deal with missing values when building a normal machine learning model differs from the way we handle missing values while building recommender systems.
+
+To Impute the missing ratings, there are different techniques, one of them is to impute them using the average ratings for the user/item or else use any other method like KNN or probabilistic clustering (checking conditional probability of the user ratings) and impute those missing values(0 ratings). I have tried imputing the missing ratings using KNN using VIM package, but the results were not satisfactory as my imputations are more skewed towards the higher scale of ratings which is not inline with the average user ratings. So for the next steps, I will be using the user average ratings and item average ratings and combine both of them and take an average of the combined value to impute the 0 ratings in my train data set.
+
+**Calculating user avg ratings**
+
+As a first step, lets calculate user average ratings in our train data set. Please note of NA's and 0 ratings while calculating the user average ratings. I have excluded 0's for my user average ratings calculations
+
+```{r}
+##pivoting the train data set
+final_data<-train %>%group_by(User.ID) %>%tidyr::pivot_wider(names_from =ISBN, values_from =Book.Rating)
+##user average rating
+final_data<-as.data.frame(final_data)
+##row sums excluding NA's and 0's
+final_data1<-final_data%>%mutate(new1="is.na<-"(rowSums(final_data[,2:151], na.rm = TRUE), !rowSums(!is.na(final_data[,2:151]))))
+##checking total NA's in the data frame
+final_data2<-final_data1%>%mutate(No_ratings=apply(final_data1[,2:151],1,function(x) sum(length(which(is.na(x))))))
+##counting the total 0 ratings in the data frame
+final_data3<-final_data2%>%mutate(missing_ratings=apply(final_data2[,2:151],1,function(x) sum(length(which((x==0))))))
+##calculating user average
+final_data4<-final_data3%>%mutate(user_avg=new1/(150-(No_ratings+missing_ratings)))
+##selecting required columns 
+final_data4<-final_data4[,c(-152,-153,-154)]
+##saving the required columns in a data frame
+user_avg_rating<-as.data.frame(final_data4[,c(1,152)])
+##replacing na's with 0 in the derived user avg ratings
+user_avg_rating$user_avg[is.na(user_avg_rating$user_avg)]<-0
+```
+
+**Calculating book average ratings**
+In the next step, lets calculate book average ratings in our train data set. Please note of NA's and 0 ratings while calculating the book average ratings. I have transposed the original matrix and applied same operations to calculate average as what I have applied for user average rating calculations
+
+```{r}
+##transposing our data frame
+book_avg<-as.data.frame(t(final_data))
+##converting all the columns to numeric
+book_avg<-sapply(book_avg[-1, 1:10000], as.numeric)
+##converting to a data frame for easy calculations
+book_avg<-as.data.frame(book_avg)
+##calculating rating sums excluding NA and 0's
+book_avg1<-book_avg%>%mutate(new2="is.na<-"(rowSums(book_avg[,1:10000], na.rm = TRUE), !rowSums(!is.na(book_avg[,1:10000]))))
+##checking total NA's in the data frame
+book_avg2<-book_avg1%>%mutate(No_ratings1=apply(book_avg1[,1:10000],1,function(x) sum(length(which(is.na(x))))))
+##counting the total 0 ratings in the data frame
+book_avg3<-book_avg2%>%mutate(missing_ratings1=apply(book_avg2[,1:10000],1,function(x) sum(length(which((x==0))))))
+##calculating book average
+book_avg4<-book_avg3%>%mutate(user_avg=new2/(10000-(No_ratings1+missing_ratings1)))
+##saving into a data frame
+book_avg_rating<-as.data.frame((book_avg4$user_avg))
+##column binding the required fields
+book_avg_rating<-cbind(colnames((final_data)[,-1]),book_avg_rating)
+##renaming the columns 
+names(book_avg_rating)[1]<-"Book_ID"
+names(book_avg_rating)[2]<-"Book_avg_rating"
+```
+
+**adding book average and user average rating to the original data frame with users in rows **
+
+Now that we have our user and book average ratings, lets go ahead and add them to our data frame. Once we have these ratings side by side, its easy to impute the 0 ratings by calculating mean and by replacing the 0 ratings with the user and book average rating.
+```{r}
+##joining the user and book average ratings with the original data frame
+new_df1<-final_data%>%pivot_longer(!User.ID, names_to = "Book_ID", values_to = "Rating")
+##left joining by user ID
+new_df2<-left_join(new_df1,user_avg_rating,by="User.ID")
+##left joining by book ID
+new_df3<-left_join(new_df2,book_avg_rating,by="Book_ID")
+```
+
+**Imputing by average of both user rating and book rating**
+
+Finally, as stated above, Imputing the 0 ratings and the snapshot of the first few rows are given below and I have also labelled them as per their type of rating
+```{r}
+##converting user avg rating to numeric
+new_df3$user_avg<-as.numeric(new_df3$user_avg)
+##converting book average rating to numeric
+new_df3$Book_avg_rating<-as.numeric(new_df3$Book_avg_rating)
+##imputing the 0 ratings 
+new_df4<-new_df3%>%mutate(imputed_rating=ifelse(Rating==0,(user_avg+Book_avg_rating)/2,Rating))
+##giving labels to differentiate the ratings
+new_df5<-new_df4%>%select(User.ID,Book_ID,Rating,imputed_rating)%>%mutate(label=ifelse(Rating==0,"Imputed","Explicit"))
+new_df5$imputed_rating<-round(new_df5$imputed_rating,0)
+##showing the values in a table format
+knitr::kable((head(new_df5)), row.names = TRUE,caption = "Summary of Imputed ratings'", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+##selecting the required columns for the final model
+new_df6<-new_df5[,c(1,2,4)]
+new_df6$imputed_rating[is.na(new_df6$imputed_rating)]<-0
+```
+Now that we have our train data set with the imputed ratings and the explicit ratings, lets go ahead and apply different collaborative filtering techniques
+
+**Modelling using User based Collaborative filtering**
+--------------
+
+**Collaborative filtering**
+
+Collaborative filtering uses similarities between the users to build the recommendation systems. The basic idea behind collaborative filtering is very simple. Suppose if we have an user x to whom we want to recommend a book or any product, we gonna find top N similar users to x and find the other products or books liked by top N similar users and then recommend them to user x. The main task is to find the set of top N similar users to x and to do this we should define similarities between the users. When we use users to predict the items that a user might like on the basis of ratings given to that item by the other users is called user based collaborative filtering. If the similarity is between the items calculated using the rating users have given to items, then it is called item based collaborative filtering. In item based collaborative filtering identifies the relationship between user and item between different items and then use the relationship to indirectly compute recommendation for the users.
+
+
+**Similarity Measures**
+
+To measure the similarities, we have many ways of doing this, there are methods like jaccard similarity, cosine similarity etc...
+
+**Jaccard Similarity**
+
+The jaccard similarity between users A and B is given by the intersection of rating vectors between 2 users and divide it by the union of the rating vectors between 2 users.It is nothing but 1-Jacard distance of rating A and rating B. To calculate Jaccard similarities, we should have common ratings between the users given to item x or the same book.The problem using Jaccard similairty is the way it is calculated, it only looks at the common ratings between the users but does not consider how they like the item/book in our case, i.,e they do not consider the rating values, they look for common ratings which is a drawback in using jaccard similarity to our case as we need to quantify/predict the user ratings. To overcome this, we have one more similarity measure called cosine similarity
+
+**Cosine Similarity**
+
+Cosine similarity is measured as a cosine angle between ratings A and B, that will compute similarity between A and B even if we have sparse data where cosine similarity give a similarity measure if we replace missing data with 0 because we are calculating the angles, that is where the problem araise, where the difference in ratings is not taken into consideration and also replacing by 0 ignores the underlying meaning(for example a user might like aquaman 1 and when his rating for aquaman2 is missing, cosine assumes to be 0).
+
+**Adjusted Cosine Similarity/Centered Cosine**
+
+To overcome the above issues, adjusted cosine similarity will come to overcome this drawback by subtracting the corresponding user average from each of his ratings. We will Normalise the ratings of a given user by subtracting row mean and treat the blank values as 0's. When we sum up the rows after noarmalization, the sum is gonna be 0 which means the average rating of every user becomes 0 thereby if any positive rating indicate that the user liked the book more and negative centered rating indicates the user liked the book less than average. The ratings are centered around 0.
+
+Due to this, in our case, as we have sparse data set, we will be using centered cosine similarity for our collaborative filtering. 
+
+**centering the ratings and finding the user similarities**
+
+As I have stated above, we should center the ratings by subtracting average user rating from his individual rating. Lets go ahead and do it in the next step.
+
+After centering the ratings, lets find the user similarities. For finding similarities I will be using a function as defined below
+
+$cosine Sim <- function(a, b){crossprod(a, b) / sqrt(crossprod(a) * crossprod(b))}$
+
+Lets go ahead and find the similarities between the users. Before that lets ensure that the user ratings are centered.Once we have centered ratings, we will calculate adjusted cosine similarity
+
+**Note** Please note that I cannot show the sample of the centered ratings or similarity matrix in the report as its too exhaustive. Please refer to my code for more details.
+
+```{r}
+##centering the ratings
+new_df6<-as.data.frame(new_df6)
+##widening the data set
+new_df7<-new_df6 %>%group_by(User.ID) %>%tidyr::pivot_wider(names_from =Book_ID, values_from = imputed_rating)
+new_df7<-as.data.frame(new_df7)
+new_df7<-sapply(new_df7, as.numeric)
+new_df7<-as.data.frame(new_df7)
+##row sums excluding NA's and 0's
+new_data1<-new_df7%>%mutate(new1="is.na<-"(rowSums(new_df7[,2:151], na.rm = TRUE), !rowSums(!is.na(new_df7[,2:151]))))
+##checking total NA's in the data frame
+new_data2<-new_data1%>%mutate(No_ratings=apply(new_data1[,2:151],1,function(x) sum(length(which(is.na(x))))))
+##counting the total 0 ratings in the data frame
+new_data3<-new_data2%>%mutate(missing_ratings=apply(new_data2[,2:151],1,function(x) sum(length(which((x==0))))))
+##calculating user average
+new_data4<-new_data3%>%mutate(user_avg=new1/(150-(No_ratings+missing_ratings)))
+new_data4<-new_data4[,c(-152,-153,-154)]
+new_df8<-new_data4
+##converting NA to 0
+new_df8[is.na(new_df8)]<-0
+##renaming the column name
+names(new_df8)[152]<-"user_avg"
+##converting all the columns to numeric as ratings are numeric
+new_df8<-sapply(new_df8, as.numeric)
+##again ensuring the data format is in a data frame
+new_df8<-as.data.frame(new_df8)
+##subtracting every rating with the user average rating
+new_df9<-(as.data.frame((new_df8[,-1] - new_df8[,152]) * (new_df8[,-1]!= 0)))
+##again combining the user ID with the centered ratings
+new_df9<-as.data.frame(cbind.data.frame(new_df7$User.ID,new_df9))
+##renaming the column
+names(new_df9)[1]<-"User_id"
+##removing the user average from our data set
+new_df9<-new_df9[,-152]
+##ensuring there are no NA's
+new_df9[is.na(new_df9)]<-0
+##converting user id to factors/characters
+new_df9$User_id<-as.factor(new_df9$User_id)
+##converting to matrix format
+sorted_my_users <- as.character(unlist(new_df9[,1]))
+##unlisting the rows and columns 
+new_df10<- as.matrix(new_df9[,-1])
+##giving back the row names back to the above matrix
+row.names(new_df10) <- sorted_my_users
+new_df11<-new_df10
+
+```
+
+```{r}
+##define cosine function
+cosine_sim <- function(a, b){crossprod(a, b) / sqrt(crossprod(a) * crossprod(b))}
+##setting seed for reproducability
+set.seed(1)
+## calculating user similarities
+user_similarities <- matrix(0, nrow = 10000, ncol = 10000)
+##defining the number of columns and rows for empty matrix
+for (i in 1:9999) {
+for (j in (i + 1):10000) {
+  ##passing the data set to the above function
+user_similarities[i,j] <- cosine_sim(new_df11[i,], new_df11[j,])
+}
+}
+##adding both transpose and user similarity to create the similarity matrix
+user_similarities <- user_similarities + t(user_similarities)
+##making diagonal elements to 0
+diag(user_similarities) <- 0
+##adding user names to the user similarities
+row.names(user_similarities) <- row.names(new_df11)
+##adding user names to user similarity matrix
+colnames(user_similarities) <- row.names(new_df11)
+##rounding the user similarities to 3
+user_similarities<-round(user_similarities, 3)
+##converting na in the user similarities to 0
+user_similarities[is.na(user_similarities)]<-0
+##ensuring diagnol elements are 0
+diag(user_similarities) <- 0
+```
+
+Now that we have our similarity matrix in place, lets see our methodology to derive predictions for the users whose ratings are missing.
+
+**Prediction of missing ratings for the users**
+
+Now, a specific user might be very similar to some users and dissimilar to the others. Hence, the ratings given to a particular item by the more similar users should be given more weightage than those given by dissimilar users. This problem can be solved by using a weighted average approach. In this approach, you multiply the rating of each user with a similarity factor calculated using the below formula
+
+The missing ratings are calculated as 
+
+To predict rating of user u for product p, as explained above we take the dot product of the similarities of top k users and their centered rating for the item which is (rating of top k similar users for a particular item-average rating of the top k users ) and divide it by the absolute top k user similarities and this ratio is added back to the average rating of the user whom we are trying to predict. It is given by the below formula.
+
+
+
+![Formulae for prediction.](D:/Masters/Ds 4 Industry/Reference/ref.jpeg){id .class width=500 height=500px}
+
+Now that we have our similarity scores in place, Lets check how many K similar users to consider for our predictions, we consider only top k similar users for our predictions. As we know in our similarity matrix we have similar and dissimilar users for each user. So to decide k value, lets select one user randomly and see how many k users are close to that user. Below is the snapshot of one randomly choosen user and his k nearest similar users.
+
+**Random user similarity check - As an Example**
+
+```{r}
+##using text2vector library to assess the top k similar checks
+library(text2vec)
+##function to pull top n similar user based on the user keyed in
+get_similar_user <- function(user_similarities, user_to_find_similarity, n_recommendations = 10){
+  ##sorts the users in the rows 
+  sort(user_similarities[user_to_find_similarity, ], decreasing = TRUE)[1:( n_recommendations)]
+}
+##output top k similar users
+k=get_similar_user(user_similarities, 2)
+##showing the values in a table format
+knitr::kable(k, row.names = TRUE,caption = "Top 10 similarity scores for user 276939 '", format.args = list(big.mark = ","),col.names = "Top 10 similarity scores") %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+```
+
+From above, we see that we have generated similarities for user 276939 and displayed his top 10 similar users. When we see the results above, its appropriate to consider atleast 5 users as their similarity scores are very close to each other. So, in this case my K value would be 5.
+
+**Simulating the denominator in the above formula - Generating top 5 absolute similarity sum for all the users**
+
+Now, to clearly understand lets split the above formulae and model each part of it accurately. Lets first simulate the denominator where it is an absolute sum of top k users where k=5
+
+For this, I will find top 5 similar users to all the users in our data set and take an absolute sum of the similarities of top 5 for each user inside the function and store the result in a file and save it to my local desktop to run the model fast.
+
+**Note**
+Please note that even if it is not saved into my local desktop, the model has no problems in running, only drawback would be, it will take time to give an output.
+
+I have shown few ratings below for reference
+
+```{r}
+##empty data frame to save the results from the iterations
+result  <- NULL;
+##using the same above function but here I am saving and summing it up 
+for (i in 1:10000){
+  ##function to find top k similar users
+get_similar_user <- function(user_similarities, user_to_find_similarity, n_recommendations = 5){
+  ##sorting them in decreasing order
+  sort(user_similarities[user_to_find_similarity, ], decreasing = TRUE)[1:( n_recommendations)]
+}
+##making diagnol elements as 0
+diag(user_similarities) <- 0
+##passing each user at once from the data frame we have
+output<-get_similar_user(user_similarities, i)
+##saving the absolute sum of similarities in the result1
+result1<-abs(output[1])+abs(output[2])+abs(output[3])+abs(output[4])+abs(output[5])
+##binding the results together
+result <- rbind(result, result1)
+}
+
+```
+
+```{r}
+##saving top k similar users in a data frame
+k_sim<-as.data.frame(result)
+##taking the user names from original the data set
+k_sim1<-k_sim%>%mutate(user=new_df7[,1]) 
+##renaming the columns
+names(k_sim1)[1]<-"Sum_k_sim_scores"
+k_sim2<-k_sim1[c("user","Sum_k_sim_scores")]
+##saving the output to the local desktop
+top_k_similarities<-write.csv(k_sim2,"D://Masters//Ds 4 Industry//Assignment 1//results.csv")
+##reading the output again for the next steps.
+result2<-read.csv("D://Masters//Ds 4 Industry//Assignment 1//results.csv",header = TRUE)
+names(result2)[3]<-"Sum of Top K=5 simialrities"
+p<-head(result2[,c(2,3)])
+##showing the values in a table format
+knitr::kable(p, row.names = TRUE,caption = "Sum of Top 5 similarity scores for all users '", format.args = list(big.mark = ",")) %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+   
+```
+
+
+Now that we have successfully simulated the denominator, lets go ahead and do the simulation for the numerator in the formula. As explained above, numerator is the dot product of top k user similarities and their centered ratings. Lets go ahead and do it in the next steps.
+
+**Simulating Numerator in the formula i.,e top k recommender scores**
+
+From above, I have explained that, the numerator is the dot product of the top 5 similar scores with the their top 5 centered ratings of the users who has also rated that book.
+
+For this, I have my similarities calculated and also have my centered ratings. For every user, I will find top 5 similar scores and their ratings and do the dot product
+
+**Note**
+
+I am not showing any output here as its exhaustive
+
+```{r}
+##setting seed for reproducability
+set.seed(1)
+##number of rows to iterate
+nusers <- nrow(new_df11)
+##converting the data to matrix
+final_data4<-as.matrix(new_df11)
+##using below function to calculate scores
+knn_UB_matrix <- function(user_similarities, new_df11, k){
+  knn_matrix <-user_similarities
+  row_ranks <- t(apply(user_similarities, 1 , rank))
+  knn_matrix[row_ranks < (nusers - k)] <- 0 
+  #crossprod(knn_matrix,final_data3)
+  knn_matrix %*% (new_df11)
+}
+##saving all the scores obtained from above function for all users
+knn_scores <- knn_UB_matrix(user_similarities, new_df11, 5)
+```
+
+Now that we have simulated both numerator and denominator, next step would be dividing them and finding the required ratio which is then added back to the user average score for who we will be predicting the rating. By default we will be predicting the rating for all the users in the train data set. We then compare the obtained predicted rating with the ratings in our test data set to derive our RMSE.
+
+**Predictions**
+```{r}
+##combining the scores with the sum of similarities to divide them
+imput1<-as.data.frame(cbind(k_sim2$Sum_k_sim_scores,knn_scores))
+##dividing as shown in the formula
+ratio<-imput1/imput1[,1]
+##converting if any na to 0
+ratio[is.na(ratio)]<-0
+##converting any infinite values to 0
+ratio[ratio == Inf] <- 0
+ratio[ratio == -Inf] <- 0
+##removing the first column which is sum of similarities
+ratio1<-ratio[,-1]
+##adding the user average rating to the ratio obtained above
+pred_rating<-as.data.frame(ratio1+new_data4$user_avg)
+##converting the obtained predictions to matrix
+pred_rating<-as.matrix(pred_rating)
+```
+
+**calculating RMSE for user based CF**
+For RMSE check on test data set, i will be comparing the ratings in the test data set with the predicted ratings from the train data set.
+```{r}
+##converting test data to data frame
+test<-as.data.frame(test)
+##converting other features to the required way
+test$ISBN<-as.factor(test$ISBN)
+test$User.ID<-as.integer(test$User.ID)
+test$Book.Rating<-as.numeric(test$Book.Rating)
+##pivot longer the predictions using melt
+predicted_ratings<-reshape2::melt(pred_rating)
+##renaming my columns to join with predictions
+names(predicted_ratings)[1]<-"User.ID"
+names(predicted_ratings)[2]<-"ISBN"
+names(predicted_ratings)[3]<-"Predicted ratings"
+compare<-left_join(test,predicted_ratings)
+##calculating RMSE between actual test and predicted ratings
+p1<-rmse(compare$Book.Rating,compare$`Predicted ratings`)
+##printing the result
+print(paste0("RMSE for User based CF on the test data set is:",round(p1,2)))
+
+```
+
+
+Now that we have seen User based collaborative filtering where we used user similarities to predict the ratings of other users, lets go ahead and do Item based collaborative filtering where we will be using similarities between the items to predict the item ratings.
+
+
+**Item based Collaborative Filtering**
+--------------------
+
+Here, we explore the relationship between the pair of items (the user who bought book a, also bought book b). We find the missing rating with the help of the ratings given to the other items by the user.
+
+Lets go ahead and simulate the same using our train data set which we derived above which is basically a combination of Explicit ratings and the imputed ratings. For this exercise lets transpose the given data set such that items are in rows and the users are in columns
+
+```{r}
+##pivot widening the train data set as explained above
+names(train)[1]<-"user_id"
+names(train)[2]<-"Book_ID"
+item_model<-train %>%group_by(Book_ID) %>%tidyr::pivot_wider(names_from = 'user_id', values_from = 'Book.Rating')
+##converting to data frame
+item_model<-as.data.frame(item_model)
+##removing na if any in case.
+item_model[is.na(item_model)]<-0
+```
+
+We will follow the same steps as we followed for user based collaborative filtering. So, as a part of next step, we will be centering the ratings and then use them for the next steps.
+
+**centering the ratings**
+
+We have already seen for user based collaborative filtering and what centering is, here we will be centering the item ratings with the average item ratings i.,e we will subtract each item rating with the average of item rating given for all the users for a particular item.
+
+```{r}
+##row sums excluding NA's and 0's
+item_model1<-item_model%>%mutate(new1="is.na<-"(rowSums(item_model[,2:10001], na.rm = TRUE), !rowSums(!is.na(item_model[,2:10001]))))
+##checking total NA's in the data frame
+item_model2<-item_model1%>%mutate(No_ratings=apply(item_model1[,2:10001],1,function(x) sum(length(which(is.na(x))))))
+##counting the total 0 ratings in the data frame
+item_model3<-item_model2%>%mutate(missing_ratings=apply(item_model2[,2:10001],1,function(x) sum(length(which((x==0))))))
+##calculating user average
+item_model4<-item_model3%>%mutate(book_avg=new1/(10000-(No_ratings+missing_ratings)))
+item_model5<-item_model4[,c(-10002,-10003,-10004)]
+##converting NA to 0
+item_model5[is.na(item_model5)]<-0
+item_model5<-as.data.frame(item_model5)
+##subtracting every rating with the item average rating
+item_model6<-(as.data.frame((item_model5[,-1] - item_model5[,152]) * (item_model5[,-1]!= 0)))
+##again combining the book ID with the centered ratings
+item_model6<-as.data.frame(cbind.data.frame(item_model5$Book_ID,item_model6))
+##renaming the column
+names(item_model6)[1]<-"Book_id"
+##removing the item average from our data set
+item_model7<-item_model6[,-10002]
+##ensuring there are no NA's
+item_model7[is.na(item_model7)]<-0
+##converting item id to factors/characters
+item_model7$Book_id<-as.factor(item_model7$Book_id)
+##converting to matrix format
+sorted_my_users <- as.character(unlist(item_model7[,1]))
+##unlisting the rows and columns 
+item_model8<- as.matrix(item_model7[,-1])
+##giving back the row names back to the above matrix
+row.names(item_model8) <- sorted_my_users
+item_model9<-item_model8
+```
+
+**calculating item similarities**
+
+Now that we have our centered ratings in place, the next step would be to calculate item similarities, here also we will be using same centered cosine similarity as how we did for User based CF. We have slightly modified the formula used for user based CF i.,e the number of columns and the rows for item similarity matrix
+```{r}
+##cosine function
+cosine_sim <- function(a, b){crossprod(a, b) / sqrt(crossprod(a) * crossprod(b))}
+##setting seed for re producability
+set.seed(1)
+##creating a dummy matrix
+item_similarities <- matrix(0, nrow = 150, ncol = 150)
+###specifying the range of rows
+for (i in 1:149) {
+  ##specifying the next row
+for (j in (i + 1):150) {
+  ##calculating the item similarity using above function
+item_similarities[i,j] <- cosine_sim(item_model9[i,], item_model9[j,])
+}
+}
+##adding item similarities as a matrix with transposed similarity values
+item_similarities <- item_similarities + t(item_similarities)
+##making diagonal values as 0's
+diag(item_similarities) <- 0
+##changing the row names, giving back the item row names for the matrix
+row.names(item_similarities) <- row.names(item_model9)
+##assigning item names for matrix columns
+colnames(item_similarities) <- row.names(item_model9)
+##rounding the similarites to 3 places
+t1<-round(item_similarities, 3)
+##removing NA's if any
+item_similarities[is.na(item_similarities)]<-0
+##ensuring the diagonal elements are 0
+diag(item_similarities) <- 0
+```
+
+**item similar check for a single items**
+
+As we did for user based CF, lets go ahead and check for any random item and see how many number of similarities are fine to consider for our predictions. Below are the 10 item similarities for book 0385504209. Here as well I will be picking up k=5 as there is no much variation in the item similarities and also to be consistent with user based CF
+
+```{r}
+##using library text2 vector
+library(text2vec)
+##function to return top n simialrity scores 
+get_similar_item <- function(item_similarities, item_to_find_similarity, n_recommendations = 10){
+  ##sorting the similarity scores to pick the top n scores
+  sort(item_similarities[item_to_find_similarity, ], decreasing = TRUE)[1:( n_recommendations)]
+}
+##rounding the scores to 4 decimals 
+r1<-round(get_similar_item(item_similarities, 1),4)
+##showing the values in a table format
+knitr::kable(r1, row.names = TRUE,caption = "Top 10 similarity scores for book 0385504209 '", format.args = list(big.mark = ","),col.names = "Top 10 similarity scores") %>% 
+ kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+```
+As, we picked k=5, now lets go ahead to the next step where we will should know on how to predict the ratings for item based collaborative filtering.
+
+
+As we know for any kind of prediction done in recommended systems, we should have similarity matrix which we calculated above, the next step is to find a way to predict the ratings.
+
+The below formula uses the items which are already rated by the user that are most similar to the missing item to generate rating. We try to generate predictions based on the ratings of similar products. We compute this using a formula which computes rating for a particular item using weighted sum of the ratings of the other similar products.
+
+![Formulae for item prediction.](D:/Masters/Ds 4 Industry/Reference/ref2.jpeg){id .class width=500 height=500px}
+
+
+
+
+
+Now, as per above formula, lets go ahead and simulate the predictions. To do that lets split the above formula and simulate step by step for easy understanding.
+
+
+**generating K=5 top similarities sum for all the items**
+
+Lets first create the denominator which is the sum of top similar items to the missing item rating. For this we will be generating k=5 similar items for each item and then sum up their similarities and store them into a data frame for the next steps.
+
+```{r}
+##saving the output to the empty data frame
+item_result  <- NULL;
+##for all the columns of items
+for (i in 1:150){
+  ##function to generate similarities
+get_similar_item <- function(item_similarities, item_to_find_similarity, n_recommendations = 5){
+  ##sorting the similarities obtained to find top k
+  sort(item_similarities[item_to_find_similarity, ], decreasing = TRUE)[1:( n_recommendations)]
+}
+##making sure diagnoals are 0
+diag(item_similarities) <- 0
+##saving output
+output1<-get_similar_item(item_similarities, i)
+##summing up all the 5 similarities
+sum_item<-abs(output1[1])+abs(output1[2])+abs(output1[3])+abs(output1[4])+abs(output1[5])
+#row binding results from each iteration
+item_result <- rbind(item_result,sum_item)
+}
+##saving results from all iterations in a data frame
+i_sim<-as.data.frame(item_result)
+##combining the headers 
+i_sim1<-i_sim%>%mutate(item=item_model2[,1])
+##renaming the columns
+names(i_sim1)[1]<-"Sum_i_sim_scores"
+i_sim2<-i_sim1[c("item","Sum_i_sim_scores")]
+row.names(i_sim2)<-item_model2$Book_ID
+```
+
+Now that we have obtained our denominator, lets go ahead and simulate the numerator in the formula which is the dot product sum of top k item similarities and their ratings.
+
+**generating top k=5 item similar scores**
+
+we will generate top k similarity scores as a dot product and add them together to make the numerator.
+
+```{r}
+set.seed(1)
+##number of rows in to generate
+nusers1 <- nrow(item_model9)
+##function to calculate for top k users
+knn_UB_matrix1 <- function(item_similarities,item_model9, k){
+  ##function to pick the top k item similarity scores
+  knn_matrix1 <-item_similarities
+  ##ranking the item similatieis
+  row_ranks1 <- t(apply(item_similarities, 1 , rank))
+  ##dot product of item ratings and their similarities
+  knn_matrix1[row_ranks1 < (nusers1 - k)] <- 0
+  knn_matrix1 %*% (item_model9)
+  #crossprod(knn_matrix,item_model3)
+}
+##executing the above function to generate top 5 scores
+knn_scores1 <- knn_UB_matrix1(item_similarities, item_model9, 5)
+
+```
+
+Now, that we have obtained our numerator and denominator, the next step is to divide them to obtain the required predicted ratings for the missing item ratings.
+
+**Prediction and RMSE for item based CF**
+
+Lets divide the top k similarity scores with the sum of the item similarities and the average item rating to obtain the required predicted ratings for the missing item ratings
+```{r}
+##data frame with the cores and sum of top k similarities
+item1<-as.data.frame(cbind(i_sim2$Sum_i_sim_scores,knn_scores1))
+##ratio as shown in the formula
+item_ratio<-item1/item1[,1]
+##replacing na with 0
+item_ratio[is.na(item_ratio)]<-0
+##replacing infinite with 0
+item_ratio[item_ratio == Inf] <- 0
+item_ratio[item_ratio == -Inf] <- 0
+##removing the sum of similarities 
+item_ratio1<-item_ratio[,-1]
+##predcting the ratings
+pred_rating_item<-item_ratio1+item_model4$book_avg
+```
+
+For RMSE check on test data set, i will be comparing the ratings in the test data set with the predicted ratings from the train data set.
+```{r}
+##transpose the ratings obtained
+pred_rating_item<-as.matrix(t(pred_rating_item))
+##saving test data set as a data frame
+test<-as.data.frame(test)
+##converting the data format to join
+test$ISBN<-as.factor(test$ISBN)
+test$User.ID<-as.factor(test$User.ID)
+test$Book.Rating<-as.integer(test$Book.Rating)
+##pivot longer the obtained predictions for easy comparsion
+predicted_ratings1<-melt(pred_rating_item)
+##change column names which makes easy to join with test
+names(predicted_ratings1)[1]<-"User.ID"
+names(predicted_ratings1)[2]<-"ISBN"
+names(predicted_ratings1)[3]<-"Predicted ratings"
+##converting the data fromat
+predicted_ratings1$ISBN<-as.factor(predicted_ratings1$ISBN)
+predicted_ratings1$User.ID<-as.factor(predicted_ratings1$User.ID)
+predicted_ratings1$`Predicted ratings`<-as.integer(predicted_ratings1$`Predicted ratings`)
+##joining the predictions with the actual ratings in test data
+compare1<-left_join(test,predicted_ratings1)
+##calculating RMSE value 
+p2<-rmse(compare1$Book.Rating,compare1$`Predicted ratings`)
+##printing the result
+print(paste0("RMSE for User based CF on the test data set is:",round(p2,2)))
+
+```
+
+
+**Matrix Factorization with 10 fold cross validation**
+----------------------
+
+Matrix factorization is also a class of collaborative filtering algorithms used in recommended systems. Matrix factorization algorithms work by decomposing the user-item interaction matrix into the product of two lower dimensional matrices.The idea behind matrix factorization is to represent users and items in a lower dimensional latent space. 
+
+Lets make it easy to understand.
+
+We will correlate the concept with the data set given to us. We have a data set above where we have user and item rating information. Now, our task is to predict the missing ratings and we have seen how we do with user and item based collaborative filtering. Matrix factorization is one of the collaborative filtering techniques, where we try to generate latent features when multiplied will approximately give us the ratings. To keep it simply in a mathematical way, its a product of 2 large rectangular matrices (latent features) which are multiplied to approximate the ratings. For example, we have users(U) and Book_Id'S (B) with size 10000 and 150 respectively. The matrix |U|*|B| include all the ratings given by the users (sparse matrix). Matrix factorization goal is to discover n latent features, given with the input of 2 rectangular matrices i.,e |U|*n and |B|*n will generate the result R which will give us Ratings. To represent it mathematically, lets assume |U|*n as X and |B|*n as Y then
+
+$X*Y^{T} = \tilde{R}$
+
+Matrix X represents the relationships between the users and the features while matrix B represents the relationships between the books and the features.We can get prediction of a rating of book by the dot product of 2 vectors corresponding to Ui and Bj.
+
+Now the next challenge would be how do we get 2 perfect matrices X and Y
+
+To Implement this, we will be using a package called reco system in R where we can initialize the two matrices with random values and calculate the difference of the product named as matrix M. Next, we minimize the difference through the iterations. The method is called gradient descent, which will help us to find a local minimum of differences.
+
+Lets go ahead and implement it using R and Recosystem package. For this, I will be using my test and train data sets which I have derived above.
+
+To supply our train data set to the recosystem package i.,e to train we should 	convert our data set to dgTMatrix as we have ratings and have a sparse matrix with users corresponding to rows and book_id's corresponding to columns.
+
+So, to convert our train and test data sets to dgTmatrix, we will use a function from recosystem called data_matrix and supply our train and test matrices to the function
+
+
+```{r}
+##pivot widening the train data set as stated above
+tr <-pivot_wider(train,names_from =Book_ID, values_from =Book.Rating)
+##replacing if any na to 0 in case
+tr[is.na(tr)]<-0
+##converting the data frame to matrix
+sorted_my_users <- as.character(unlist(tr[,1]))
+##unlisting the column names
+tr <- as.matrix(tr[,-1])
+##joining the row names
+row.names(tr) <- sorted_my_users
+##pivot widening the test data set 
+te <-pivot_wider(test,names_from =ISBN, values_from =Book.Rating)
+##replacing if any na with 0
+te[is.na(te)]<-0
+##changing the above data frame to matrix
+sorted_my_users1 <- as.character(unlist(te[,1]))
+te <- as.matrix(te[,-1])
+##renaming the matrix headers
+row.names(te) <- sorted_my_users1
+##converting to matrix form
+train1<-as.matrix(tr)
+test1<-as.matrix(te)
+##replacing any na with 0
+train1[is.na(train1)]<-0
+test1[is.na(test1)]<-0
+##converting test and train to reco format dgtmatrix
+train_data<-data_matrix(as(train1, "dgTMatrix"))
+test_data<-data_matrix(as(test1, "dgTMatrix"))
+```
+
+**Building Model without applying regularization and applying 10 fold cross validation**
+
+Lets go ahead and build our regular matrix factorization model using recosystem. For this model I should find the best parameters to fit my data set. I will use a 5 fold cross validation to choose the best model parameters, Once I get these parameters, I will then use them to train my model and then use it on test data set. To do this,in the recosystem, I will use a function called reco tune() where I will supply my train data set to it to find best parameters. Again the question here, what are parameters? As explained above, we need to find the best latent factors where our difference is minimial. For this I need to specify the gradient descent learning rate and number of iterations and total number of cross validations to perform on my data set to yield to get my best latent factors. For my model below, I will be use the model to determine my latent factors any where between 1 to 20 and test the learning rates (0.05,0.01,0.1) with 10 fold cross validation.
+
+Speciality about recosystem is that we can parallelise our computations by specifying the number of processing threads to use which will help model to run on multiple cores faster. I will use 9 nthreads for my tune
+
+We are creating a model below with no regularization applied. I will talk about it in the next steps.
+
+Lets go ahead and implement using 10 fold cross validation with no L2 regularization using Reco tune()
+
+```{r}
+##setting seed for reproducability
+set.seed(123)
+##defining reco
+r<-Reco()
+##tuning my train data set by specifying the tune paramters
+##latent factors between 1 and 20 
+##with 9 threads to process the calculations
+##200 iterations
+##10 fold cross validation
+##no regularization applied
+opts1 <- r$tune(train_data,opts = list(dim = c(1:20),lrate = c(0.05,0.01,0.1),nthread = 9,costp_l1 = 0,costp_l2 = 0,costq_l1 = 0,costq_l2 = 0,niter = 200,nfold = 10,verbose = FALSE,progress=FALSE))
+```
+
+From above model, the best parameters obtained are as follows.
+
+1. The optimum number of latent factors are `r opts1$min$dim`
+2. No regularization applied
+3. The best learning rate obtained is `r opts1$min$lrate`
+
+By using above best optimal parameters, lets go ahead and train our data set.
+
+```{r}
+##training the train data set using optimal parameters
+set.seed(1)
+r<-Reco()
+training<-r$train(train_data, opts = c(opts1$min, nthread = 9, niter = 200,verbose=FALSE))
+```
+We have trained our train data set using the best parameters and the latent matrices are stored in memory. Now, lets go ahead and test our model on the test data set and see the prediction accuracy using Rmse.
+
+Below is the model accuracy with 10 fold cross validation and with no regularization applied on the test data set.
+
+```{r}
+##Predictions on test data set
+set.seed(1)
+y_hat_reco <-  r$predict(test_data, out_memory())
+##savings Predictions
+pred<-as.data.frame(y_hat_reco)
+```
+
+```{r}
+##calculating RMSE
+##taking the actual ratings from the test data set
+actual<-as.data.frame(test_data@source[3])
+##converting predictions to a data frame
+pred<-as.data.frame(y_hat_reco)
+##column binding the actuals and predictions
+compare3<-as.data.frame(cbind.data.frame(actual,pred))
+names(compare3)[1]<-"Actual"
+names(compare3)[2]<-"predicted"
+##calculating the RMSE value 
+q1<-round(rmse(compare3$Actual,compare3$predicted),3)
+print(paste0("Model Accuracy with 10 fold CV and No Regularization: ",q1))
+
+```
+
+**Matrix factorization Applying L2 regularization**
+----------------
+
+Now, lets apply regularization and check for the model accuracy. Before doing that, lets try to understand what regularization is, regularization is a technique which is used to reduce the error by fitting a function approximately on the training set there by avoiding over fitting. This way, we can reduce the error.As a part of this exercise, we are asked to test on L2 regularization. L2 regularization is basically a Ridge regression. We have 2 regularization, one is Lasso and another is Ridge. Lasso tries to estimate the median of the data while ridge tries to estimate the mean of the data to avoid over fitting. So, lets go ahead and apply Ridge(L2) regularization to our model. 
+
+In Recosystem its easy to apply regularizations, all that we need to do is to specify it as a part of our parameters in the tune() function to estimate best parameters. In the previous model, we did not apply L2, In this model we will apply L2 regularization cost for both user and Book factors and see how it impacts our accuracy.As I defined above, I am using same parameter range to tune. Just that I am introducing costq_L2 and CostP_L2 in the function where I am giving 0.01 and 0.1 and 0.05 as an input to L2 for both user and item factors to the tune() function.
+
+```{r}
+##setting seed for reproducability
+set.seed(123)
+##defining reco
+r<-Reco()
+##tune the model using different parameters and L2 regularization
+opts2 <- r$tune(train_data,opts = list(dim = c(1:20),lrate = c(0.05,0.01,0.1),nthread = 9,costp_l1 = 0,costp_l2 = c(0.05,0.01,0.1),costq_l1 = 0,costq_l2 = c(0.01,0.1,0.05),niter = 200,nfold = 10,verbose = FALSE,progress=FALSE))
+```
+
+From the model with L2 regularization, the best parameters obtained are as follows.
+
+1. The optimum number of latent factors are `r opts2$min$dim`
+2. with L2 regularization applied
+3. The best learning rate obtained is `r opts2$min$lrate`
+4. The best L2 parameter for user factors  is `r opts2$min$costp_l2`
+5. The best L2 parameter for item factors is `r opts2$min$costq_l2`
+
+By using above best optimal parameters, lets go ahead and train our data set.
+
+Now, that we have tuned our model and obtained our best model parameters as defined above, lets go ahead and fit this model parameters to train and predict the ratings. We will also then check the model accuracy on the test data set and calculate RMSE value
+
+```{r}
+set.seed(1)
+##applying the best parameters on the train data 
+training1<-r$train(train_data, opts = c(opts2$min, nthread = 9, niter = 200,verbose=FALSE))
+##Prediction using test data set
+y_hat_reco1 <-  r$predict(test_data, out_memory())
+##saving predictions
+pred1<-as.data.frame(y_hat_reco1)
+```
+
+```{r}
+##calculating RMSE
+actual1<-as.data.frame(test_data@source[3])
+##data frame with actual ratings and predictions
+pred1<-as.data.frame(y_hat_reco1)
+##adding both actual and predicted to single data frame
+compare4<-as.data.frame(cbind.data.frame(actual1,pred1))
+##renaming their column names
+names(compare4)[1]<-"Actual"
+names(compare4)[2]<-"predicted"
+##calculating the RMSE value
+q2<-round(rmse(compare4$Actual,compare4$predicted),3)
+##printing the result
+print(paste0("Model Accuracy with 10 fold CV and with L2 Regularization: ",q2))
+```
+
+From above we see that there is no big impact of adding L2 regularization on our model. The change in accuracy with L2 regularization is negligible.
+
+##Adding Bias using collective Matrix Factorization
+
+I have tried exploring collective matrix factorization using cmfrec library and CMF function. I could not do much there as its a relatively new library released in March 2020 and have less documentation available but what i have explored it can handle user and item information (side information) along with the rating information. That library has a functionality where we can define user and item bias and predict the ratings on the sparse data set. It has a capability to impute the 0 ratings itself and also it can easily predict and recommend to new users based on the side information supplied to it.
+
+
+**Ensembled Model**
+-----------------
+Now, that we have seen different models and their predictions above, now lets go ahead and build the ensembled model by taking predictions from all the models above i.,e user based, item based and best performing Matrix factorization method and them average all those predictions and lets calculate the RMSE. for doing this, there are many ways, one can follow max voting ensembling, averaging, weighted averaging etc.. In my case, I will go with averaging ensembling method
+
+In Average ensembling method, we take an average of predictions from all the models and use it to make the final prediction.We will build ensembled model i.,e by averaging predicted ratings from all the above models and calculate the RMSE value with the test data set and see the accuracy.  
+
+Before doing that from above, we see that user based, item based has an RMSE values of `r round(p1,2)` and `r round(p2,2)` respectively where as Matrix factorization has RMSE of `r round(q1,2)` before applying L2 regularization and RMSE of `r round(q2,2)`after applying L2 regularization. Based on these, I will be only using user based, item based and matrix factorization with L2 regularization(negligible improvement in RMSE) for ensembling and will take average of all these model predictions and then calculate RMSE on it.
+
+```{r}
+final_rmse<-cbind.data.frame(compare$`Predicted ratings`,compare1$`Predicted ratings`,compare4$predicted)
+names(final_rmse)[1]<-"user_based_predictions"
+names(final_rmse)[2]<-"Item_based_predictions"
+names(final_rmse)[3]<-"MF_With_L2_Predictions"
+final_rmse1<-final_rmse%>%mutate(Ensembled_pred=(final_rmse$Item_based_predictions+final_rmse$MF_With_L2_Predictions+final_rmse$user_based_predictions)/3)
+final_rmse2<-cbind(compare$Book.Rating,final_rmse1$Ensembled_pred)
+rmse_final<-round(RMSE(final_rmse2[,1],final_rmse2[,2]),2)
+print(paste0("Model Accuracy with ensembled model: ",rmse_final))
+```
+
+Lets compare the RMSE across all the models below.
+```{r}
+a<-round(p1,2)
+b<-round(p2,2)
+c<-round(q1,2)
+d<-round(q2,2)
+e<-round(rmse_final,2)
+
+table5<-data.frame(Methods=c('User_based CF','Item_based CF','Matrix Factorization_CF with CV','Matrix Factorization with L2 Regularization','Averagining Ensembled_Model'),RMSE=c(a,b,c,d,e))
+## comparing the RMSE from different methods
+table5 %>% knitr::kable(caption = "Comparison of RMSE on test data set") %>%
+## displaying the results in table using kable
+kableExtra::kable_styling(bootstrap_options = "striped", latex_options = "HOLD_position")
+## printing all RMSE from the above models
+```
+
+**Conclusion**
+------------
+
+From above, we see that RMSE results, for the next steps we can build the recommender systems from the best model predictions. In this case, it would be Ensembled model with the the RMSE value of `r rmse_final`
+
+
+
+
+
+
+
+
+
+
+
+
+
